@@ -51,6 +51,7 @@ class PDFDocument(BaseModel):
 class QuestionSet(BaseModel):
     section_id: str = Field(description="章节ID")
     section_title: str = Field(description="章节标题")
+    parent_title: Optional[str] = Field(default=None, description="父章节标题")
     questions: List[Question] = Field(description="题目列表")
     total_count: int = Field(description="题目总数")
 

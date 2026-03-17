@@ -45,6 +45,7 @@ def save_questions_incremental(question_sets: list, output_dir: str, filename: s
         section_data = {
             "section_id": qs.section_id,
             "section_title": qs.section_title,
+            "parent_title": qs.parent_title,
             "question_count": qs.total_count,
             "questions": [q.model_dump() for q in qs.questions]
         }
@@ -97,10 +98,10 @@ def process(pdf_path, output, questions, no_ppt, no_questions, combined_ppt, use
         from .question_generator import _interrupted
         
         flat_sections = generator._flatten_sections(document.sections)
-        valid_sections = [s for s in flat_sections if len(s.content.strip()) >= 100]
+        valid_sections = [(s, p) for s, p in flat_sections if len(s.content.strip()) >= 100]
         
         if section:
-            valid_sections = filter_sections_by_range(valid_sections, section)
+            valid_sections = filter_sections_by_range_tuples(valid_sections, section)
             print(f"  指定处理 {len(valid_sections)} 个章节\n")
         else:
             print(f"  共 {len(valid_sections)} 个章节需要处理")
@@ -108,7 +109,7 @@ def process(pdf_path, output, questions, no_ppt, no_questions, combined_ppt, use
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
-        for i, sec in enumerate(valid_sections, 1):
+        for i, (sec, parent_title) in enumerate(valid_sections, 1):
             if _interrupted:
                 break
             
@@ -116,7 +117,8 @@ def process(pdf_path, output, questions, no_ppt, no_questions, combined_ppt, use
             try:
                 question_set = generator.generate_for_section(
                     section=sec,
-                    num_questions=questions
+                    num_questions=questions,
+                    parent_title=parent_title
                 )
                 question_sets.append(question_set)
                 print(f"    ✓ 生成 {question_set.total_count} 题")
@@ -185,6 +187,25 @@ def filter_sections_by_range(sections, range_str):
     return selected
 
 
+def filter_sections_by_range_tuples(sections, range_str):
+    """根据范围字符串过滤章节 (tuple格式)"""
+    selected = []
+    ranges = range_str.split(',')
+    
+    for r in ranges:
+        r = r.strip()
+        if '-' in r:
+            start, end = map(int, r.split('-'))
+            for i in range(start - 1, min(end, len(sections))):
+                selected.append(sections[i])
+        else:
+            idx = int(r) - 1
+            if 0 <= idx < len(sections):
+                selected.append(sections[idx])
+    
+    return selected
+
+
 @cli.command()
 @click.argument('pdf_path', type=click.Path(exists=True))
 @click.option('--output', '-o', default='output', help='输出目录')
@@ -225,7 +246,8 @@ def parse(pdf_path, output):
 @click.option('--questions', '-q', default=25, help='每节生成的题目数量')
 @click.option('--section', '-s', default=None, help='指定章节编号(如: 1,3,5-8)')
 @click.option('--retry', '-r', default=0, help='失败重试次数')
-def questions(pdf_path, output, questions, section, retry):
+@click.option('--append', '-a', default=None, type=click.Path(exists=True), help='追加到现有JSON文件')
+def questions(pdf_path, output, questions, section, retry, append):
     """仅生成试题
     
     示例:
@@ -233,6 +255,7 @@ def questions(pdf_path, output, questions, section, retry):
       python run.py questions one.pdf -s 1,3,5           # 处理第1,3,5章
       python run.py questions one.pdf -s 5-10            # 处理第5到10章
       python run.py questions one.pdf -s 1,3,5-8 -r 2    # 指定章节并重试2次
+      python run.py questions one.pdf -s 12,13 -a output/questions_xxx.json  # 追加到现有文件
     """
     
     if not settings.AI_API_KEY:
@@ -249,22 +272,48 @@ def questions(pdf_path, output, questions, section, retry):
     from .question_generator import _interrupted
     
     flat_sections = generator._flatten_sections(document.sections)
-    valid_sections = [s for s in flat_sections if len(s.content.strip()) >= 100]
+    valid_sections = [(s, p) for s, p in flat_sections if len(s.content.strip()) >= 100]
     
     if section:
-        valid_sections = filter_sections_by_range(valid_sections, section)
+        valid_sections = filter_sections_by_range_tuples(valid_sections, section)
         print(f"指定处理 {len(valid_sections)} 个章节\n")
     else:
         print(f"共 {len(valid_sections)} 个章节需要处理\n")
     
+    existing_sections = []
+    if append:
+        with open(append, 'r', encoding='utf-8') as f:
+            existing_data = json.load(f)
+            existing_sections = existing_data.get('sections', [])
+            print(f"从 {append} 加载了 {len(existing_sections)} 个现有章节\n")
+    
     question_sets = []
     failed_sections = []
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     output_manager = OutputManager(output)
     
-    for i, sec in enumerate(valid_sections, 1):
+    if append:
+        for sec_data in existing_sections:
+            qs = QuestionSet(
+                section_id=sec_data['section_id'],
+                section_title=sec_data['section_title'],
+                parent_title=sec_data.get('parent_title'),
+                questions=[Question(**q) for q in sec_data['questions']],
+                total_count=sec_data['question_count']
+            )
+            question_sets.append(qs)
+        
+        output_filename = Path(append).stem
+    else:
+        output_filename = f"questions_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    for i, (sec, parent_title) in enumerate(valid_sections, 1):
         if _interrupted:
             break
+        
+        existing_ids = [qs.section_id for qs in question_sets]
+        if sec.id in existing_ids:
+            print(f"[{i}/{len(valid_sections)}] {sec.title[:30]}... 已存在，跳过")
+            continue
         
         print(f"[{i}/{len(valid_sections)}] {sec.title[:30]}...")
         
@@ -276,13 +325,14 @@ def questions(pdf_path, output, questions, section, retry):
             try:
                 question_set = generator.generate_for_section(
                     section=sec,
-                    num_questions=questions
+                    num_questions=questions,
+                    parent_title=parent_title
                 )
                 
                 if question_set.total_count > 0:
                     question_sets.append(question_set)
                     print(f"  ✓ 生成 {question_set.total_count} 题")
-                    save_questions_incremental(question_sets, output, f"questions_{timestamp}")
+                    save_questions_incremental(question_sets, output, output_filename)
                     success = True
                     break
                 else:
@@ -295,8 +345,8 @@ def questions(pdf_path, output, questions, section, retry):
     
     if question_sets:
         print(f"\n✓ 完成: {len(question_sets)} 章节, {sum(qs.total_count for qs in question_sets)} 题")
-        json_path = save_questions_incremental(question_sets, output, f"questions_{timestamp}")
-        excel_paths = output_manager.save_questions_to_excel(question_sets, f"questions_{timestamp}", separate_answer=True)
+        json_path = save_questions_incremental(question_sets, output, output_filename)
+        excel_paths = output_manager.save_questions_to_excel(question_sets, output_filename, separate_answer=True)
         print(f"JSON: {json_path}")
         print(f"题目: {excel_paths.get('questions')}")
         print(f"答案: {excel_paths.get('answers')}")
@@ -343,6 +393,46 @@ def ppt(pdf_path, output, combined, use_ai):
             use_ai=use_ai
         )
         print(f"\n✓ 生成 {len(ppt_documents)} 个PPT文件")
+
+
+@cli.command()
+@click.argument('json_path', type=click.Path(exists=True))
+@click.option('--output', '-o', default='output/ppt_questions', help='输出目录')
+@click.option('--start', '-s', default=0, help='从第几个章节开始(从0开始)')
+@click.option('--count', '-c', default=None, type=int, help='生成多少个章节(默认全部)')
+def question_ppt(json_path, output, start, count):
+    """从JSON文件生成题目答案PPT(纯模板方式，无需AI)
+    
+    示例:
+      python run.py question-ppt output/questions_xxx.json           # 生成全部
+      python run.py question-ppt output/questions_xxx.json -s 5      # 从第6章开始
+      python run.py question-ppt output/questions_xxx.json -s 0 -c 5 # 只生成前5章
+    """
+    
+    output_manager = OutputManager(Path(json_path).parent)
+    question_sets = output_manager.load_questions_from_json(json_path)
+    
+    if not question_sets:
+        print("未找到试题数据")
+        return
+    
+    print(f"加载了 {len(question_sets)} 个章节")
+    print(f"使用纯模板方式生成PPT")
+    
+    if count:
+        print(f"生成范围: 第{start+1}章 到 第{start+count}章\n")
+    elif start > 0:
+        print(f"生成范围: 从第{start+1}章开始\n")
+    else:
+        print(f"生成范围: 全部章节\n")
+    
+    from .question_ppt_generator import TemplatePPTGenerator
+    
+    generator = TemplatePPTGenerator()
+    results = generator.generate_all(question_sets, output, start=start, count=count)
+    
+    print(f"\n✓ 完成: 生成 {len(results)} 个PPT文件")
+    print(f"输出目录: {output}")
 
 
 @cli.command()

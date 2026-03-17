@@ -35,6 +35,7 @@ class OutputManager:
             section_data = {
                 "section_id": qs.section_id,
                 "section_title": qs.section_title,
+                "parent_title": qs.parent_title,
                 "question_count": qs.total_count,
                 "questions": [q.model_dump() for q in qs.questions]
             }
@@ -243,6 +244,7 @@ class OutputManager:
             question_set = QuestionSet(
                 section_id=section_data["section_id"],
                 section_title=section_data["section_title"],
+                parent_title=section_data.get("parent_title"),
                 questions=questions,
                 total_count=len(questions)
             )

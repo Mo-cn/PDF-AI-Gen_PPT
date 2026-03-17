@@ -28,7 +28,8 @@ class QuestionGenerator:
     def generate_for_section(
         self,
         section: Section,
-        num_questions: int = None
+        num_questions: int = None,
+        parent_title: str = None
     ) -> QuestionSet:
         num_questions = num_questions or settings.QUESTIONS_PER_SECTION
         
@@ -78,6 +79,7 @@ class QuestionGenerator:
         return QuestionSet(
             section_id=section.id,
             section_title=section.title,
+            parent_title=parent_title,
             questions=questions,
             total_count=len(questions)
         )
@@ -106,16 +108,17 @@ class QuestionGenerator:
         question_sets = []
         
         flat_sections = self._flatten_sections(sections)
-        valid_sections = [s for s in flat_sections if len(s.content.strip()) >= min_content_length]
+        valid_sections = [(s, p) for s, p in flat_sections if len(s.content.strip()) >= min_content_length]
         
-        for i, section in enumerate(valid_sections, 1):
+        for i, (section, parent_title) in enumerate(valid_sections, 1):
             if _interrupted:
                 break
             
             try:
                 question_set = self.generate_for_section(
                     section=section,
-                    num_questions=num_questions_per_section
+                    num_questions=num_questions_per_section,
+                    parent_title=parent_title
                 )
                 question_sets.append(question_set)
             except KeyboardInterrupt:
@@ -125,12 +128,12 @@ class QuestionGenerator:
         
         return question_sets
     
-    def _flatten_sections(self, sections: List[Section]) -> List[Section]:
+    def _flatten_sections(self, sections: List[Section], parent_title: str = None) -> List[tuple]:
         result = []
         for section in sections:
-            result.append(section)
+            result.append((section, parent_title))
             if section.children:
-                result.extend(self._flatten_sections(section.children))
+                result.extend(self._flatten_sections(section.children, section.title))
         return result
     
     def validate_questions(self, question_set: QuestionSet) -> Dict[str, Any]:
